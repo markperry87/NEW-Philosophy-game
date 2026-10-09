@@ -1,0 +1,30 @@
+import assert from 'node:assert/strict';
+import * as E from '../lib/game-engine.mjs';
+const url='http://127.0.0.1:5173/api/save',headers={Cookie:'__sites_local_auth=1','Content-Type':'application/json'};
+const id=()=>crypto.randomUUID();
+const send=(method,body,extra={})=>fetch(url,{method,headers:{...headers,...extra},body:JSON.stringify(body)});
+const open=async(session,action='open',requestId=id())=>{const r=await send('POST',{session,action,requestId});assert.equal(r.status,200);return r.json();};
+const save=(state,revision,session,requestId=id(),extra={})=>send('PUT',{state,revision,session,requestId},extra);
+assert.equal((await fetch(url)).status,401);
+assert.equal((await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'new',session:id(),requestId:id()})})).status,401);
+const backup=await(await fetch(url,{headers})).json();
+try{
+ const a=id(),b=id();const first=await open(a);
+ assert.equal((await save({...E.fresh(),thoughts:-1},first.revision,a)).status,400);
+ assert.equal((await save(E.fresh(),first.revision,a,id(),{Origin:'https://wrong.example'})).status,403);
+ assert.equal((await send('POST',{session:a,action:'new',requestId:id()},{Origin:'https://wrong.example'})).status,403);
+ const fixture=Object.assign(E.fresh(),{thoughts:123,run:123,lifetime:123});
+ const writeId=id(),written=await save(fixture,first.revision,a,writeId);assert.equal(written.status,200);const saved=await written.json();
+ const duplicate=await save(fixture,first.revision,a,writeId);assert.equal(duplicate.status,200);assert.equal((await duplicate.json()).revision,saved.revision);
+ assert.equal((await save(fixture,first.revision,a)).status,409);
+ const second=await open(b);assert.equal(second.state.thoughts,123);
+ const stale=await save(fixture,saved.revision,a);assert.equal(stale.status,409);assert.equal((await stale.json()).code,'SESSION_CHANGED');
+ const resetId=id(),fresh=await open(a,'new',resetId);assert.equal(fresh.state.thoughts,0);assert.equal(fresh.state.lifetime,0);assert.equal(fresh.state.wisdom,0);
+ const repeatedReset=await open(a,'new',resetId);assert.equal(repeatedReset.revision,fresh.revision);
+ assert.equal((await save(fixture,second.revision,b)).status,409);
+ assert.equal((await send('PUT',{state:fixture,revision:fresh.revision})).status,409);
+ const concurrent=await Promise.all([save(fixture,fresh.revision,a),save(fixture,fresh.revision,a)]);assert.deepEqual(concurrent.map(r=>r.status).sort(),[200,409]);
+ const reopened=await open(b);assert.equal(reopened.state.thoughts,123);
+ assert.equal((await send('POST',{session:'bad',action:'new',requestId:id()})).status,400);
+ console.log('PASS: auth, validation, origin, save retries, two-window handoff, reset from stale window, duplicate reset, legacy protection, concurrent writes, reopen.');
+}finally{const session=id(),opened=await open(session);const restored=await save(backup.state??E.fresh(),opened.revision,session);assert.equal(restored.status,200);}
